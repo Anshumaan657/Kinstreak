@@ -39,6 +39,7 @@ create table public.challenges (
   id uuid primary key default gen_random_uuid(),
   title text not null default '100 Days Hard' check (char_length(trim(title)) between 1 and 120),
   start_date date not null,
+  timezone text not null default 'Asia/Kolkata' check (timezone = 'Asia/Kolkata'),
   duration_days integer not null default 100 check (duration_days = 100),
   created_by uuid not null references auth.users(id) on delete restrict,
   created_at timestamptz not null default timezone('utc', now()),
@@ -150,6 +151,57 @@ returns integer language sql stable security invoker set search_path = public as
   from public.challenges c where c.id = target_challenge;
 $$;
 
+create or replace function public.challenge_local_date(target_challenge uuid)
+returns date language sql stable security invoker set search_path = public as $$
+  select (timezone(c.timezone, now()))::date
+  from public.challenges c where c.id = target_challenge;
+$$;
+
+create or replace function public.is_challenge_today(target_challenge uuid, target_date date)
+returns boolean language sql stable security invoker set search_path = public as $$
+  select target_date = public.challenge_local_date(target_challenge);
+$$;
+
+create or replace function public.prevent_non_today_completion_edit()
+returns trigger language plpgsql security invoker set search_path = public as $$
+begin
+  if not public.is_challenge_today(
+    (select challenge_id from public.tasks where id = coalesce(new.task_id, old.task_id)),
+    coalesce(new.completed_on, old.completed_on)
+  ) then
+    raise exception 'Only the current challenge day can be edited';
+  end if;
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger completions_current_day_only
+before insert or update or delete on public.daily_task_completions
+for each row execute function public.prevent_non_today_completion_edit();
+
+create or replace function public.prevent_non_today_summary_edit()
+returns trigger language plpgsql security invoker set search_path = public as $$
+begin
+  if not public.is_challenge_today(
+    coalesce(new.challenge_id, old.challenge_id),
+    coalesce(new.summary_date, old.summary_date)
+  ) then
+    raise exception 'Only the current challenge day can be edited';
+  end if;
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end;
+$$;
+
+create trigger summaries_current_day_only
+before insert or update or delete on public.daily_summaries
+for each row execute function public.prevent_non_today_summary_edit();
+
 create or replace function public.recompute_daily_summary(target_challenge uuid, target_user uuid, target_date date)
 returns public.daily_status language plpgsql security definer set search_path = public as $$
 declare
@@ -234,11 +286,15 @@ using (owner_id = auth.uid() and public.is_challenge_member(challenge_id));
 create policy completions_read_shared on public.daily_task_completions for select to authenticated
 using (public.is_challenge_member((select challenge_id from public.tasks where id = task_id)));
 create policy completions_insert_self on public.daily_task_completions for insert to authenticated
-with check (owner_id = auth.uid());
+with check (owner_id = (select auth.uid()) and public.is_challenge_today(
+  (select challenge_id from public.tasks where id = task_id), completed_on
+));
 create policy completions_update_self on public.daily_task_completions for update to authenticated
-using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+using (owner_id = (select auth.uid())) with check (owner_id = (select auth.uid()) and public.is_challenge_today(
+  (select challenge_id from public.tasks where id = task_id), completed_on
+));
 create policy completions_delete_self on public.daily_task_completions for delete to authenticated
-using (owner_id = auth.uid());
+using (owner_id = (select auth.uid()));
 
 create policy summaries_read_shared on public.daily_summaries for select to authenticated
 using (public.is_challenge_member(challenge_id));
