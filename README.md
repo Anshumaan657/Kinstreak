@@ -15,6 +15,8 @@ The security boundary is in `supabase/schema.sql`:
 - daily success is derived from all active tasks, so the client cannot mark a day complete by itself;
 - server-side helper functions compute challenge day and daily status;
 - Realtime is enabled only for the shared task/progress tables.
+- New email-authenticated users receive a default profile through a database trigger.
+- Magic-link callbacks exchange the auth code on the server in `app/auth/callback/route.ts`.
 
 ## Local setup
 
