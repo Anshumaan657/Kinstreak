@@ -4,7 +4,7 @@ Private shared 100-day challenge tracker for a small sibling group.
 
 ## Stage 1: backend and security
 
-This repository currently contains the backend foundation only. It uses Supabase's free tier for Google authentication, Postgres, Row Level Security, and Realtime. No paid service is required.
+This repository currently contains the backend foundation only. It uses Clerk for Google authentication and Supabase's free tier for Postgres, Row Level Security, and Realtime. No paid service is required.
 
 The security boundary is in `supabase/migrations/20260928000100_initial_schema.sql`:
 
@@ -16,15 +16,14 @@ The security boundary is in `supabase/migrations/20260928000100_initial_schema.s
 - daily success is derived from all active tasks, so the client cannot mark a day complete by itself;
 - server-side helper functions compute challenge day and daily status;
 - Realtime is enabled only for the shared task/progress tables.
-- New email-authenticated users receive a default profile through a database trigger.
-- Magic-link callbacks exchange the auth code on the server in `app/auth/callback/route.ts`.
+- Clerk provides persistent sessions and Google OAuth; Supabase verifies Clerk JWTs through its third-party auth integration.
 
 ## Local setup
 
 1. Create a free Supabase project.
 2. Install the Supabase CLI and apply the migration with `supabase db push`.
-3. Enable Google provider in Supabase Auth and add the app callback URL `/auth/callback`.
-4. Copy `.env.example` to `.env.local` and fill in the project URL and publishable key.
+3. Create a Clerk application, enable Google, and configure its Supabase integration.
+4. Copy `.env.example` to `.env.local` and fill in Clerk and Supabase public values.
 5. Install dependencies and run the checks:
 
 ```bash

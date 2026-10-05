@@ -7,7 +7,7 @@ create type public.challenge_member_role as enum ('owner', 'member');
 create type public.daily_status as enum ('not_started', 'partial', 'complete', 'missed');
 
 create table public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
+  id text primary key,
   display_name text not null check (char_length(trim(display_name)) between 1 and 80),
   avatar_color text not null default '#0f766e' check (avatar_color ~ '^#[0-9A-Fa-f]{6}$'),
   timezone text not null default 'UTC' check (char_length(timezone) between 1 and 80),
@@ -15,40 +15,20 @@ create table public.profiles (
   updated_at timestamptz not null default timezone('utc', now())
 );
 
-create or replace function public.handle_new_user()
-returns trigger language plpgsql security definer set search_path = public as $$
-begin
-  insert into public.profiles (id, display_name)
-  values (
-    new.id,
-    coalesce(
-      nullif(trim(new.raw_user_meta_data ->> 'display_name'), ''),
-      split_part(coalesce(new.email, 'member'), '@', 1)
-    )
-  )
-  on conflict (id) do nothing;
-  return new;
-end;
-$$;
-
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute function public.handle_new_user();
-
 create table public.challenges (
   id uuid primary key default gen_random_uuid(),
   title text not null default '100 Days Hard' check (char_length(trim(title)) between 1 and 120),
   start_date date not null,
   timezone text not null default 'Asia/Kolkata' check (timezone = 'Asia/Kolkata'),
   duration_days integer not null default 100 check (duration_days = 100),
-  created_by uuid not null references auth.users(id) on delete restrict,
+  created_by text not null,
   created_at timestamptz not null default timezone('utc', now()),
   updated_at timestamptz not null default timezone('utc', now())
 );
 
 create table public.challenge_members (
   challenge_id uuid not null references public.challenges(id) on delete cascade,
-  user_id uuid not null references auth.users(id) on delete cascade,
+  user_id text not null,
   role public.challenge_member_role not null default 'member',
   joined_at timestamptz not null default timezone('utc', now()),
   primary key (challenge_id, user_id)
@@ -57,7 +37,7 @@ create table public.challenge_members (
 create table public.tasks (
   id uuid primary key default gen_random_uuid(),
   challenge_id uuid not null references public.challenges(id) on delete cascade,
-  owner_id uuid not null references auth.users(id) on delete cascade,
+  owner_id text not null,
   title text not null check (char_length(trim(title)) between 1 and 160),
   description text check (description is null or char_length(description) <= 500),
   sort_order integer not null default 0,
@@ -70,7 +50,7 @@ create table public.tasks (
 create table public.daily_task_completions (
   id uuid primary key default gen_random_uuid(),
   task_id uuid not null references public.tasks(id) on delete cascade,
-  owner_id uuid not null references auth.users(id) on delete cascade,
+  owner_id text not null,
   completed_on date not null,
   completed_at timestamptz,
   note text check (note is null or char_length(note) <= 1000),
@@ -83,7 +63,7 @@ create table public.daily_task_completions (
 create table public.daily_summaries (
   id uuid primary key default gen_random_uuid(),
   challenge_id uuid not null references public.challenges(id) on delete cascade,
-  owner_id uuid not null references auth.users(id) on delete cascade,
+  owner_id text not null,
   summary_date date not null,
   status public.daily_status not null default 'not_started',
   note text check (note is null or char_length(note) <= 2000),
@@ -129,7 +109,7 @@ for each row execute function public.set_updated_at();
 create trigger summaries_set_updated_at before update on public.daily_summaries
 for each row execute function public.set_updated_at();
 
-create or replace function public.is_challenge_member(target_challenge uuid, target_user uuid default auth.uid())
+create or replace function public.is_challenge_member(target_challenge uuid, target_user text default (auth.jwt() ->> 'sub'))
 returns boolean language sql stable security definer set search_path = public as $$
   select exists (
     select 1 from public.challenge_members
@@ -137,7 +117,7 @@ returns boolean language sql stable security definer set search_path = public as
   );
 $$;
 
-create or replace function public.is_challenge_owner(target_challenge uuid, target_user uuid default auth.uid())
+create or replace function public.is_challenge_owner(target_challenge uuid, target_user text default (auth.jwt() ->> 'sub'))
 returns boolean language sql stable security definer set search_path = public as $$
   select exists (
     select 1 from public.challenge_members
@@ -202,14 +182,14 @@ create trigger summaries_current_day_only
 before insert or update or delete on public.daily_summaries
 for each row execute function public.prevent_non_today_summary_edit();
 
-create or replace function public.recompute_daily_summary(target_challenge uuid, target_user uuid, target_date date)
+create or replace function public.recompute_daily_summary(target_challenge uuid, target_user text, target_date date)
 returns public.daily_status language plpgsql security definer set search_path = public as $$
 declare
   active_count integer;
   completed_count integer;
   result public.daily_status;
 begin
-  if auth.uid() is distinct from target_user then
+  if (auth.jwt() ->> 'sub') is distinct from target_user then
     raise exception 'Only the owner can recompute their daily summary';
   end if;
 
@@ -248,19 +228,19 @@ create policy profiles_read_shared on public.profiles for select to authenticate
 using (exists (
   select 1 from public.challenge_members mine
   join public.challenge_members theirs on theirs.challenge_id = mine.challenge_id
-  where mine.user_id = auth.uid() and theirs.user_id = profiles.id
+  where mine.user_id = (auth.jwt() ->> 'sub') and theirs.user_id = profiles.id
 ));
 create policy profiles_update_self on public.profiles for update to authenticated
-using (id = auth.uid()) with check (id = auth.uid());
+using (id = (auth.jwt() ->> 'sub')) with check (id = (auth.jwt() ->> 'sub'));
 create policy profiles_insert_self on public.profiles for insert to authenticated
-with check (id = auth.uid());
+with check (id = (auth.jwt() ->> 'sub'));
 
 create policy challenges_read_member on public.challenges for select to authenticated
 using (public.is_challenge_member(id));
 create policy challenges_insert_self on public.challenges for insert to authenticated
-with check (created_by = auth.uid());
+with check (created_by = (auth.jwt() ->> 'sub'));
 create policy challenges_update_owner on public.challenges for update to authenticated
-using (public.is_challenge_owner(id)) with check (created_by = auth.uid());
+using (public.is_challenge_owner(id)) with check (created_by = (auth.jwt() ->> 'sub'));
 create policy challenges_delete_owner on public.challenges for delete to authenticated
 using (public.is_challenge_owner(id));
 
@@ -276,35 +256,35 @@ using (public.is_challenge_owner(challenge_id));
 create policy tasks_read_shared on public.tasks for select to authenticated
 using (public.is_challenge_member(challenge_id));
 create policy tasks_insert_self on public.tasks for insert to authenticated
-with check (owner_id = auth.uid() and public.is_challenge_member(challenge_id));
+with check (owner_id = (auth.jwt() ->> 'sub') and public.is_challenge_member(challenge_id));
 create policy tasks_update_self on public.tasks for update to authenticated
-using (owner_id = auth.uid() and public.is_challenge_member(challenge_id))
-with check (owner_id = auth.uid() and public.is_challenge_member(challenge_id));
+using (owner_id = (auth.jwt() ->> 'sub') and public.is_challenge_member(challenge_id))
+with check (owner_id = (auth.jwt() ->> 'sub') and public.is_challenge_member(challenge_id));
 create policy tasks_delete_self on public.tasks for delete to authenticated
-using (owner_id = auth.uid() and public.is_challenge_member(challenge_id));
+using (owner_id = (auth.jwt() ->> 'sub') and public.is_challenge_member(challenge_id));
 
 create policy completions_read_shared on public.daily_task_completions for select to authenticated
 using (public.is_challenge_member((select challenge_id from public.tasks where id = task_id)));
 create policy completions_insert_self on public.daily_task_completions for insert to authenticated
-with check (owner_id = (select auth.uid()) and public.is_challenge_today(
+with check (owner_id = (select (auth.jwt() ->> 'sub')) and public.is_challenge_today(
   (select challenge_id from public.tasks where id = task_id), completed_on
 ));
 create policy completions_update_self on public.daily_task_completions for update to authenticated
-using (owner_id = (select auth.uid())) with check (owner_id = (select auth.uid()) and public.is_challenge_today(
+using (owner_id = (select (auth.jwt() ->> 'sub'))) with check (owner_id = (select (auth.jwt() ->> 'sub')) and public.is_challenge_today(
   (select challenge_id from public.tasks where id = task_id), completed_on
 ));
 create policy completions_delete_self on public.daily_task_completions for delete to authenticated
-using (owner_id = (select auth.uid()));
+using (owner_id = (select (auth.jwt() ->> 'sub')));
 
 create policy summaries_read_shared on public.daily_summaries for select to authenticated
 using (public.is_challenge_member(challenge_id));
 create policy summaries_insert_self on public.daily_summaries for insert to authenticated
-with check (owner_id = auth.uid() and public.is_challenge_member(challenge_id));
+with check (owner_id = (auth.jwt() ->> 'sub') and public.is_challenge_member(challenge_id));
 create policy summaries_update_self on public.daily_summaries for update to authenticated
-using (owner_id = auth.uid() and public.is_challenge_member(challenge_id))
-with check (owner_id = auth.uid() and public.is_challenge_member(challenge_id));
+using (owner_id = (auth.jwt() ->> 'sub') and public.is_challenge_member(challenge_id))
+with check (owner_id = (auth.jwt() ->> 'sub') and public.is_challenge_member(challenge_id));
 create policy summaries_delete_self on public.daily_summaries for delete to authenticated
-using (owner_id = auth.uid());
+using (owner_id = (auth.jwt() ->> 'sub'));
 
 -- Keep realtime limited to the shared data needed by the dashboard.
 alter publication supabase_realtime add table public.tasks;
