@@ -10,6 +10,7 @@ const securityHeaders = [
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   poweredByHeader: false,
+  outputFileTracingRoot: process.cwd(),
   async headers() {
     return [{ source: "/(.*)", headers: securityHeaders }];
   },
